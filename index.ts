@@ -18,6 +18,10 @@ function stringify<T>(obj: T): string {
     return obj.toString();
   }
 
+  if (typeof (obj as any)["toJSON"] === "function") {
+    return obj.toString();
+  }
+
   return JSON.stringify(obj);
 }
 
@@ -74,8 +78,8 @@ class ImmutableMap<K, V> extends Collection<K, V> {
     return this.items.size;
   }
 
-  toString(): string {
-    const output = this.reduce(
+  toJSON() {
+    return this.reduce(
       (sum, v, k) => {
         sum.push(`${stringify(k)}: ${stringify(v)}`);
 
@@ -83,8 +87,10 @@ class ImmutableMap<K, V> extends Collection<K, V> {
       },
       [] as Array<string>
     );
+  }
 
-    return `map<${output.join(", ")}>`;
+  toString(): string {
+    return `map<${this.toJSON().join(", ")}>`;
   }
 
   has(key: K): boolean {
@@ -95,12 +101,20 @@ class ImmutableMap<K, V> extends Collection<K, V> {
     return this.items.get(key);
   }
 
-  set(key: K, value: V): ImmutableMap<K, V> {
-    const dup = new Map<K, V>(this.items);
+  set<V2>(key: K, value: V2): ImmutableMap<K, V | V2> {
+    const dup = new Map<K, V | V2>(this.items);
 
     dup.set(key, value);
 
-    return new ImmutableMap<K, V>(dup);
+    return new ImmutableMap<K, V | V2>(dup);
+  }
+
+  update<V2>(
+    key: K,
+    updaterFn: (currentValue: V | undefined) => V2
+  ): ImmutableMap<K, V | V2> {
+    const newValue = updaterFn(this.get(key));
+    return this.set(key, newValue);
   }
 
   keys(): Array<K> {
@@ -186,8 +200,12 @@ class ImmutableVector<V> extends Collection<number, V> {
     return this.items;
   }
 
+  toJSON() {
+    return this.items.map(stringify);
+  }
+
   join(delimiter: string): string {
-    return this.items.map(stringify).join(delimiter);
+    return this.toJSON().join(delimiter);
   }
 
   toString(): string {
@@ -258,8 +276,7 @@ class ImmutableVector<V> extends Collection<number, V> {
     index: number,
     updaterFn: (currentValue: V | undefined) => V2
   ): ImmutableVector<V | V2> {
-    const newValue = updaterFn(this.get(index));
-    return this.set(index, newValue);
+    return this.set(index, updaterFn(this.get(index)));
   }
 
   delete(index: number): ImmutableVector<V> {
@@ -408,15 +425,18 @@ const map = ImmutableMap.from;
 const vector = ImmutableVector.from;
 const set = ImmutableSet.from;
 
-type RecordInstance<T> = { readonly [P in keyof T]?: T[P] } & {
+type RecordInstance<T> = { readonly [P in keyof T]: T[P] } & {
   set<K extends keyof T>(key: K, value: T[K]): RecordInstance<T>;
+  update<K extends keyof T, V2>(
+    key: K,
+    updaterFn: (currentValue: T[K] | undefined) => V2
+  ): RecordInstance<T>;
   get<K extends keyof T>(key: K): T[K] | undefined;
+  toString(): string;
 };
 
-function record<T extends object>() {
-  const makeInstance = (
-    data: Partial<T> | ImmutableMap<string, any>
-  ): RecordInstance<T> => {
+function record<T extends object>(recordType: string = "record") {
+  const makeInstance = (data: T): RecordInstance<T> => {
     const baseMap: any = data instanceof ImmutableMap ? data : map(data as any);
 
     return new Proxy(baseMap, {
@@ -426,6 +446,22 @@ function record<T extends object>() {
             return <K extends keyof T>(key: K, value: T[K]) => {
               const result = baseMap.set(key, value);
               return result === baseMap ? baseMap : makeInstance(result);
+            };
+          }
+
+          if (name === "update") {
+            return <K extends keyof T, V2>(
+              key: K,
+              updaterFn: (currentValue: T[K] | undefined) => V2
+            ): RecordInstance<T> => {
+              const result = baseMap.update(key, updaterFn);
+              return result === baseMap ? baseMap : makeInstance(result);
+            };
+          }
+
+          if (name === "toString") {
+            return (): string => {
+              return `${recordType}<${baseMap.toJSON().join(", ")}>`;
             };
           }
 
@@ -488,14 +524,14 @@ console.log(m3.get(v1)!.toString());
 const person = record<{
   name: string;
   age: number;
-  job: RecordInstance<Job>;
-}>();
+  job?: RecordInstance<Job>;
+}>("person");
 
 // Subrecord def
 type Job = {
   title: string;
 };
-const job = record<Job>();
+const job = record<Job>("job");
 
 // Constructor, with type checked params.
 const thomas = person({ name: "Thomas", age: 34, job: job({ title: "TD" }) });
@@ -510,3 +546,6 @@ console.log(thomas.get("name"));
 // Setting
 const t2 = thomas.set("name", "test");
 console.log(t2.name);
+
+const t3 = thomas.update("name", t => t!.toLowerCase());
+console.log(t3.name);
